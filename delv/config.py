@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -20,8 +20,9 @@ def get_delv_dir() -> Path:
 class Config:
     """Delv configuration."""
     
-    editor: str = "vim"
+    editor: str = "nvim"
     default_mode: Literal["tui", "cli"] = "tui"
+    theme: str = "delv-tokyo-night"
     
     @classmethod
     def load(cls) -> "Config":
@@ -34,6 +35,7 @@ class Config:
                 return cls(
                     editor=data.get("editor", "vim"),
                     default_mode=data.get("defaultMode", "tui"),
+                    theme=data.get("theme", "delv-tokyo-night"),
                 )
             except (json.JSONDecodeError, IOError):
                 pass
@@ -47,6 +49,7 @@ class Config:
             json.dump({
                 "editor": self.editor,
                 "defaultMode": self.default_mode,
+                "theme": self.theme,
             }, f, indent=2)
 
 

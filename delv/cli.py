@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
-import tempfile
 from pathlib import Path
 
 import click
@@ -14,9 +12,9 @@ from .config import (
     Config,
     ensure_delv_dir,
     get_current_tree_name,
-    get_editor,
     set_current_tree_name,
 )
+from .editor import edit_node_interactive
 from .storage import (
     copy_tree,
     delete_tree,
@@ -48,79 +46,6 @@ def save_current(tree: ExplorationTree) -> None:
     save_tree(tree)
 
 
-def edit_node_external(tree: ExplorationTree, node_id: str) -> None:
-    """Edit a node using an external editor."""
-    node = tree.nodes.get(node_id)
-    if not node:
-        raise click.ClickException(f"Node '{node_id}' not found")
-    
-    # Create temp file with frontmatter + body
-    links_str = ", ".join(node.links) if node.links else ""
-    content = f"""---
-title: {node.title}
-status: {node.status.value}
-links: [{links_str}]
----
-
-{node.body}"""
-    
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as f:
-        f.write(content)
-        temp_path = Path(f.name)
-    
-    try:
-        editor = get_editor()
-        subprocess.run([editor, str(temp_path)], check=True)
-        
-        # Parse the result
-        new_content = temp_path.read_text(encoding="utf-8")
-        
-        # Parse frontmatter
-        if new_content.startswith("---"):
-            parts = new_content.split("---", 2)
-            if len(parts) >= 3:
-                frontmatter = parts[1].strip()
-                body = parts[2].strip()
-                
-                # Parse YAML-like frontmatter
-                title = node.title
-                status = node.status
-                links = node.links
-                
-                for line in frontmatter.split("\n"):
-                    if ":" in line:
-                        key, value = line.split(":", 1)
-                        key = key.strip()
-                        value = value.strip()
-                        
-                        if key == "title":
-                            title = value
-                        elif key == "status":
-                            try:
-                                status = NodeStatus(value)
-                            except ValueError:
-                                pass
-                        elif key == "links":
-                            # Parse [n1, n2] format
-                            value = value.strip("[]")
-                            if value:
-                                links = [l.strip() for l in value.split(",") if l.strip()]
-                            else:
-                                links = []
-                
-                tree.update_node(node_id, title=title, body=body, status=status, links=links)
-                save_current(tree)
-                display.print_success(f"Updated node [{node_id}]")
-            else:
-                raise click.ClickException("Invalid file format")
-        else:
-            # No frontmatter, treat entire content as body
-            tree.update_node(node_id, body=new_content.strip())
-            save_current(tree)
-            display.print_success(f"Updated node [{node_id}]")
-    
-    finally:
-        temp_path.unlink()
 
 
 # === Main group ===
@@ -362,7 +287,12 @@ def edit_cmd(node_id):
     """Edit a node in external editor."""
     tree = get_current_tree()
     nid = node_id or tree.current
-    edit_node_external(tree, nid)
+    try:
+        edit_node_interactive(tree, nid)
+        save_current(tree)
+        display.print_success(f"Updated node [{nid}]")
+    except ValueError as e:
+        raise click.ClickException(str(e))
 
 
 @cli.command("title")

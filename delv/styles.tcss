@@ -1,0 +1,401 @@
+/* Delv TUI Styles - Uses Textual's theme variables */
+
+/* === App Shell === */
+Screen {
+    background: $background;
+}
+
+Header {
+    background: $surface;
+    color: $foreground;
+    dock: top;
+    height: 1;
+}
+
+Footer {
+    background: $panel;
+    color: $foreground;
+}
+
+FooterKey {
+    background: $panel;
+    color: $accent;
+}
+
+FooterKey > .footer-key--key {
+    background: $accent;
+    color: $background;
+}
+
+/* === Main Layout === */
+#main-container {
+    layout: horizontal;
+    background: $background;
+}
+
+/* === Panels === */
+.panel {
+    background: $surface;
+    border: solid $panel;
+    border-title-color: $secondary;
+    border-title-style: bold;
+}
+
+.panel:focus-within {
+    border: double $primary;
+}
+
+#trees-panel {
+    width: 15%;
+    min-width: 14;
+    max-width: 24;
+}
+
+#nodes-panel {
+    width: 35%;
+    min-width: 30;
+}
+
+#content-panel {
+    width: 50%;
+}
+
+/* === Panel Titles === */
+.panel-title {
+    background: $panel;
+    color: $foreground;
+    text-align: center;
+    text-style: bold;
+    padding: 0 1;
+    height: 1;
+}
+
+.panel:focus-within .panel-title {
+    background: $primary;
+    color: $background;
+}
+
+/* === Trees List === */
+#trees-list {
+    background: $surface;
+}
+
+#trees-list > ListItem {
+    padding: 0 1;
+    color: $secondary;
+    background: $surface;
+}
+
+#trees-list > ListItem:hover {
+    background: $panel;
+}
+
+#trees-list > ListItem.--highlight {
+    background: $primary;
+    color: $background;
+}
+
+#trees-list > ListItem.--highlight:hover {
+    background: $primary;
+}
+
+/* === Node Tree === */
+#node-tree {
+    background: $surface;
+    padding: 0;
+}
+
+#node-tree > .tree--guides {
+    color: $panel;
+}
+
+#node-tree > .tree--guides-hover {
+    color: $secondary;
+}
+
+#node-tree > .tree--guides-selected {
+    color: $primary;
+}
+
+#node-tree > .tree--cursor {
+    background: $panel;
+    color: $foreground;
+    text-style: bold;
+}
+
+#node-tree:focus > .tree--cursor {
+    background: $primary;
+    color: $background;
+}
+
+/* === Content Panel === */
+#content-scroll {
+    background: $surface;
+    padding: 1 2;
+}
+
+#node-header {
+    background: $panel;
+    padding: 0 1;
+    margin-bottom: 1;
+    height: auto;
+}
+
+#node-title {
+    color: $foreground;
+    text-style: bold;
+}
+
+#node-meta {
+    color: $secondary;
+}
+
+#node-body {
+    color: $foreground;
+    margin-bottom: 1;
+}
+
+#node-body Markdown {
+    margin: 0;
+}
+
+#links-section {
+    border-top: solid $panel;
+    padding-top: 1;
+    margin-top: 1;
+    color: $secondary;
+}
+
+/* === Status Colors === */
+.status-active {
+    color: $accent;
+}
+
+.status-done {
+    color: $success;
+}
+
+.status-dropped {
+    color: $error;
+}
+
+.status-todo {
+    color: $warning;
+}
+
+/* === Modal Screens === */
+ModalScreen {
+    background: rgba(0, 0, 0, 0.65);
+    align: center middle;
+}
+
+.modal-container {
+    background: $surface;
+    border: thick $primary;
+    padding: 1 2;
+    width: 80%;
+    max-width: 80;
+    height: auto;
+    max-height: 80%;
+}
+
+#help-container {
+    width: 90%;
+    max-width: 100;
+    height: 90%;
+    background: $surface;
+    border: thick $primary;
+    padding: 0;
+}
+
+#help-viewer {
+    height: 100%;
+    background: $surface;
+}
+
+/* === Modal Elements === */
+#input-prompt, #select-prompt, #confirm-message, #backlinks-title {
+    color: $foreground;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#confirm-options {
+    text-align: center;
+    margin-top: 1;
+    color: $secondary;
+}
+
+#search-results {
+    height: auto;
+    max-height: 20;
+    margin-top: 1;
+    background: $surface;
+    border: solid $panel;
+}
+
+#search-results > ListItem {
+    padding: 0 1;
+    color: $secondary;
+}
+
+#search-results > ListItem.--highlight {
+    background: $primary;
+    color: $background;
+}
+
+/* OptionList styling for select/backlinks/theme screens */
+#select-list, #backlinks-list, #theme-list {
+    height: auto;
+    max-height: 20;
+    margin-top: 1;
+    background: $surface;
+    border: solid $panel;
+}
+
+/* === Stats Screen === */
+#stats-container {
+    width: 60%;
+    max-width: 60;
+    height: auto;
+    max-height: 70%;
+}
+
+#stats-content {
+    height: auto;
+    color: $foreground;
+}
+
+/* === Input Widget === */
+Input {
+    background: $panel;
+    color: $foreground;
+    border: solid $panel;
+    padding: 0 1;
+}
+
+Input:focus {
+    border: solid $primary;
+}
+
+Input > .input--cursor {
+    background: $primary;
+    color: $background;
+}
+
+Input > .input--placeholder {
+    color: $secondary;
+}
+
+/* === Markdown Styling === */
+Markdown {
+    background: transparent;
+}
+
+MarkdownH1 {
+    color: $primary;
+    text-style: bold;
+    margin: 1 0;
+}
+
+MarkdownH2 {
+    color: $foreground;
+    text-style: bold;
+    margin: 1 0 0 0;
+    border-bottom: solid $panel;
+}
+
+MarkdownH3 {
+    color: $secondary;
+    text-style: bold;
+    margin: 1 0 0 0;
+}
+
+MarkdownBlockQuote {
+    background: $panel;
+    border-left: thick $primary;
+    padding: 0 1;
+    margin: 1 0;
+}
+
+MarkdownFence {
+    background: $background;
+    border: solid $panel;
+    padding: 0 1;
+    margin: 1 0;
+}
+
+MarkdownTable {
+    margin: 1 0;
+}
+
+MarkdownTH {
+    background: $panel;
+    color: $foreground;
+    text-style: bold;
+}
+
+MarkdownTD {
+    color: $secondary;
+}
+
+/* === Quick Reference Box === */
+#quick-ref {
+    background: $panel;
+    border: solid $secondary;
+    padding: 1;
+    margin-bottom: 1;
+    height: auto;
+}
+
+#quick-ref-title {
+    color: $primary;
+    text-style: bold;
+}
+
+#quick-ref-content {
+    color: $foreground;
+}
+
+/* === Notification Toast === */
+Toast {
+    background: $panel;
+    color: $foreground;
+    border: solid $primary;
+}
+
+/* === Theme Selector === */
+#theme-selector {
+    width: 60%;
+    max-width: 60;
+    height: auto;
+    max-height: 50%;
+}
+
+#theme-title {
+    color: $primary;
+    text-style: bold;
+    text-align: center;
+    margin-bottom: 1;
+}
+
+#theme-list {
+    height: auto;
+    max-height: 15;
+    background: $surface;
+    border: solid $panel;
+}
+
+#theme-list > ListItem {
+    padding: 0 2;
+    color: $secondary;
+}
+
+#theme-list > ListItem:hover {
+    background: $panel;
+}
+
+#theme-list > ListItem.--highlight {
+    background: $primary;
+    color: $background;
+}

@@ -2,31 +2,30 @@
 
 from __future__ import annotations
 
-import subprocess
-import tempfile
-from pathlib import Path
-
 import pyperclip
-from textual import on
+from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
-from textual.message import Message
+from textual.command import Hit, Hits, Provider
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
     Footer,
     Header,
     Input,
     Label,
-    ListItem,
-    ListView,
     Markdown,
+    MarkdownViewer,
+    OptionList,
     Static,
     Tree,
 )
+from textual.suggester import Suggester
+from textual.widgets.option_list import Option
 from textual.widgets.tree import TreeNode
 
-from .config import get_current_tree_name, get_editor, set_current_tree_name
+from .config import Config, get_current_tree_name, set_current_tree_name
+from .editor import edit_node_interactive
 from .storage import (
     delete_tree,
     list_trees,
@@ -35,7 +34,161 @@ from .storage import (
     save_tree,
     tree_exists,
 )
+from .themes import THEME_DISPLAY_NAMES, THEME_NAMES, get_themes
 from .tree import ExplorationTree, Node, NodeStatus
+
+
+# === Custom Suggester for Node IDs ===
+
+class NodeIdSuggester(Suggester):
+    """Suggester that provides node ID completions."""
+    
+    def __init__(self, tree: ExplorationTree, case_sensitive: bool = False) -> None:
+        super().__init__(case_sensitive=case_sensitive)
+        self._tree = tree
+    
+    async def get_suggestion(self, value: str) -> str | None:
+        """Get a completion suggestion for the given input."""
+        if not value:
+            return None
+        
+        value_lower = value.lower() if not self.case_sensitive else value
+        
+        # Find matching node IDs
+        for nid in self._tree.nodes:
+            nid_cmp = nid.lower() if not self.case_sensitive else nid
+            if nid_cmp.startswith(value_lower) and nid != value:
+                return nid
+        
+        return None
+
+
+# === Command Palette Provider ===
+
+class DelvCommands(Provider):
+    """Command palette provider for Delv actions."""
+    
+    async def search(self, query: str) -> Hits:
+        """Search for commands."""
+        app = self.app
+        
+        # Define all available commands
+        commands = [
+            ("添加子节点", "创建新的子节点", app.action_add_child),
+            ("添加兄弟节点", "创建同级节点", app.action_add_sibling),
+            ("编辑节点", "使用外部编辑器编辑", app.action_edit_external),
+            ("编辑标题", "快速修改节点标题", app.action_edit_title),
+            ("追加内容", "向节点追加文本", app.action_append_body),
+            ("标记完成", "将节点标记为已完成", app.action_mark_done),
+            ("标记放弃", "将节点标记为已放弃", app.action_mark_dropped),
+            ("标记待办", "将节点标记为待办", app.action_mark_todo),
+            ("添加链接", "创建到其他节点的链接", app.action_add_link),
+            ("移除链接", "删除现有链接", app.action_remove_link),
+            ("显示反向链接", "查看指向此节点的链接", app.action_show_backlinks),
+            ("移动节点", "将节点移动到新位置", app.action_move_node),
+            ("复制内容", "复制节点内容到剪贴板", app.action_yank_body),
+            ("粘贴内容", "从剪贴板粘贴内容", app.action_paste_body),
+            ("复制节点ID", "复制节点ID到剪贴板", app.action_yank_id),
+            ("新建树", "创建新的探索树", app.action_new_tree),
+            ("重命名树", "重命名当前树", app.action_rename_tree),
+            ("删除树", "删除当前树", app.action_delete_tree),
+            ("搜索", "在树中搜索节点", app.action_search),
+            ("统计信息", "显示树的统计数据", app.action_show_stats),
+            ("切换主题", "更换界面主题", app.action_select_theme),
+            ("跳转到根节点", "返回根节点", app.action_go_root),
+            ("跳转到节点", "按ID跳转到节点", app.action_goto_node),
+            ("返回父节点", "向上导航一级", app.action_go_parent),
+            ("历史后退", "返回上一个访问的节点", app.action_go_back),
+            ("强制保存", "立即保存当前树", app.action_force_save),
+            ("帮助", "显示快捷键帮助", app.action_show_help),
+        ]
+        
+        matcher = self.matcher(query)
+        
+        for name, description, callback in commands:
+            score = matcher.match(name)
+            if score > 0:
+                yield Hit(
+                    score,
+                    matcher.highlight(name),
+                    callback,
+                    help=description,
+                )
+
+
+# === Help Text ===
+
+HELP_FULL = """# Delv 快捷键
+
+## 速查
+| 操作 | 快捷键 |
+|------|--------|
+| 方向移动 | `h` `j` `k` `l` |
+| 进入/选择 | `Enter` |
+| 返回父节点 | `Backspace` |
+| 历史后退 | `-` |
+| 添加子节点 | `a` |
+| 编辑节点 | `e` |
+| 标记完成 | `d` |
+| 搜索 | `/` |
+
+---
+
+## 导航
+| 快捷键 | 操作 |
+|--------|------|
+| `h` `l` | 切换面板焦点 (左/右) |
+| `j` `k` | 上下移动 |
+| `Enter` | 进入节点 / 打开树 |
+| `Backspace` | 返回父节点 |
+| `-` | 历史后退 |
+| `r` | 跳转到根节点 |
+| `g` | 按 ID 跳转 |
+| `]` `[` | 跳转到下/上一个链接 |
+
+## 编辑
+| 快捷键 | 操作 |
+|--------|------|
+| `a` | 添加子节点 |
+| `A` | 添加兄弟节点 |
+| `e` | 编辑节点 (外部编辑器) |
+| `E` | 快速编辑标题 |
+| `i` | 快速追加内容 |
+| `d` | 标记完成 (自动返回) |
+| `x` | 标记放弃 (自动返回) |
+| `t` | 标记待办 |
+
+## 链接与结构
+| 快捷键 | 操作 |
+|--------|------|
+| `L` | 添加链接 |
+| `U` | 移除链接 |
+| `B` | 显示反向链接 |
+| `m` | 移动节点 |
+| `y` | 复制内容到剪贴板 |
+| `p` | 粘贴到内容 |
+| `Y` | 复制节点 ID |
+
+## 树管理
+| 快捷键 | 操作 |
+|--------|------|
+| `n` | 新建树 |
+| `R` | 重命名树 |
+| `D` | 删除树 |
+
+## 其他
+| 快捷键 | 操作 |
+|--------|------|
+| `Ctrl+P` | **命令面板** (模糊搜索所有命令) |
+| `/` | 搜索 |
+| `s` | 统计信息 |
+| `T` | 切换主题 |
+| `?` | 帮助 |
+| `Ctrl+S` | 强制保存 |
+| `q` | 退出 |
+
+> **提示**: 按 `Ctrl+P` 打开命令面板，可以模糊搜索所有可用命令！
+"""
 
 
 # === Screens ===
@@ -44,122 +197,52 @@ class HelpScreen(ModalScreen):
     """Help screen showing keybindings."""
     
     BINDINGS = [
-        Binding("escape", "dismiss", "Close"),
-        Binding("q", "dismiss", "Close"),
-        Binding("j", "scroll_down", "Scroll down", show=False),
-        Binding("k", "scroll_up", "Scroll up", show=False),
-        Binding("down", "scroll_down", "Scroll down", show=False),
-        Binding("up", "scroll_up", "Scroll up", show=False),
-        Binding("pagedown", "page_down", "Page down", show=False),
-        Binding("pageup", "page_up", "Page up", show=False),
-        Binding("g", "scroll_top", "Top", show=False),
-        Binding("G", "scroll_bottom", "Bottom", show=False),
+        Binding("escape", "dismiss", "关闭"),
+        Binding("q", "dismiss", "关闭"),
     ]
     
     def compose(self) -> ComposeResult:
-        help_text = """# Delv - Keyboard Shortcuts
-
-**Navigation:** `j/k` scroll, `q/Esc` close
-
-## Navigation
-| Key | Action |
-|-----|--------|
-| `h` `l` | Switch panel focus (left/right) |
-| `j` `k` | Move up/down in list |
-| `Enter` | Enter node / Open tree |
-| `Backspace` | Go to parent node |
-| `-` | Go back in history |
-| `r` | Jump to root |
-| `g` | Goto node by ID |
-| `]` `[` | Jump to next/prev link |
-
-## Editing
-| Key | Action |
-|-----|--------|
-| `a` | Add child node |
-| `A` | Add sibling node |
-| `e` | Edit node (external editor) |
-| `E` | Quick edit title |
-| `i` | Quick append to body |
-| `d` | Mark done (auto-return) |
-| `x` | Mark dropped (auto-return) |
-| `t` | Mark todo |
-
-## Links & Structure
-| Key | Action |
-|-----|--------|
-| `L` | Add link |
-| `U` | Remove link |
-| `B` | Show backlinks |
-| `m` | Move node mode |
-| `y` | Yank body to clipboard |
-| `p` | Paste to body |
-| `Y` | Yank node ID |
-
-## Trees
-| Key | Action |
-|-----|--------|
-| `n` | New tree |
-| `R` | Rename tree |
-| `D` | Delete tree |
-
-## Other
-| Key | Action |
-|-----|--------|
-| `/` | Search |
-| `s` | Statistics |
-| `?` | This help |
-| `q` | Quit |
-| `Ctrl+S` | Force save |
-"""
-        from textual.containers import VerticalScroll
+        # MarkdownViewer has built-in scrolling and keyboard navigation
         yield Container(
-            VerticalScroll(
-                Markdown(help_text, id="help-content"),
-                id="help-scroll",
-            ),
+            MarkdownViewer(HELP_FULL, show_table_of_contents=False, id="help-viewer"),
             id="help-container",
         )
     
+    def on_mount(self) -> None:
+        self.query_one("#help-viewer").focus()
+    
     def action_dismiss(self) -> None:
         self.app.pop_screen()
-    
-    def action_scroll_down(self) -> None:
-        self.query_one("#help-scroll").scroll_down()
-    
-    def action_scroll_up(self) -> None:
-        self.query_one("#help-scroll").scroll_up()
-    
-    def action_page_down(self) -> None:
-        self.query_one("#help-scroll").scroll_page_down()
-    
-    def action_page_up(self) -> None:
-        self.query_one("#help-scroll").scroll_page_up()
-    
-    def action_scroll_top(self) -> None:
-        self.query_one("#help-scroll").scroll_home()
-    
-    def action_scroll_bottom(self) -> None:
-        self.query_one("#help-scroll").scroll_end()
 
 
 class InputScreen(ModalScreen[str | None]):
     """Modal screen for text input."""
     
     BINDINGS = [
-        Binding("escape", "cancel", "Cancel"),
+        Binding("escape", "cancel", "取消"),
     ]
     
-    def __init__(self, prompt: str, default: str = "") -> None:
+    def __init__(
+        self,
+        prompt: str,
+        default: str = "",
+        suggester: Suggester | None = None,
+    ) -> None:
         super().__init__()
         self.prompt = prompt
         self.default = default
+        self.suggester = suggester
     
     def compose(self) -> ComposeResult:
         yield Container(
             Label(self.prompt, id="input-prompt"),
-            Input(value=self.default, id="input-field"),
+            Input(
+                value=self.default,
+                id="input-field",
+                suggester=self.suggester,
+            ),
             id="input-container",
+            classes="modal-container",
         )
     
     def on_mount(self) -> None:
@@ -177,9 +260,9 @@ class ConfirmScreen(ModalScreen[bool]):
     """Modal screen for confirmation."""
     
     BINDINGS = [
-        Binding("y", "confirm", "Yes"),
-        Binding("n", "cancel", "No"),
-        Binding("escape", "cancel", "Cancel"),
+        Binding("y", "confirm", "是"),
+        Binding("n", "cancel", "否"),
+        Binding("escape", "cancel", "取消"),
     ]
     
     def __init__(self, message: str) -> None:
@@ -189,8 +272,9 @@ class ConfirmScreen(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         yield Container(
             Label(self.message, id="confirm-message"),
-            Label("[y] Yes  [n] No", id="confirm-options"),
+            Label("[y] 是  [n] 否", id="confirm-options"),
             id="confirm-container",
+            classes="modal-container",
         )
     
     def action_confirm(self) -> None:
@@ -204,7 +288,7 @@ class SearchScreen(ModalScreen[str | None]):
     """Modal screen for search."""
     
     BINDINGS = [
-        Binding("escape", "cancel", "Cancel"),
+        Binding("escape", "cancel", "取消"),
     ]
     
     def __init__(self, tree: ExplorationTree) -> None:
@@ -214,9 +298,10 @@ class SearchScreen(ModalScreen[str | None]):
     
     def compose(self) -> ComposeResult:
         yield Container(
-            Input(placeholder="Search...", id="search-input"),
-            ListView(id="search-results"),
+            Input(placeholder="搜索...", id="search-input"),
+            OptionList(id="search-results"),
             id="search-container",
+            classes="modal-container",
         )
     
     def on_mount(self) -> None:
@@ -224,8 +309,8 @@ class SearchScreen(ModalScreen[str | None]):
     
     @on(Input.Changed)
     def on_search_changed(self, event: Input.Changed) -> None:
-        results_view = self.query_one("#search-results", ListView)
-        results_view.clear()
+        results_view = self.query_one("#search-results", OptionList)
+        results_view.clear_options()
         
         query = event.value.strip()
         if not query:
@@ -235,9 +320,7 @@ class SearchScreen(ModalScreen[str | None]):
         self.results = self.current_tree.search(query)
         for nid in self.results[:20]:  # Limit to 20 results
             node = self.current_tree.nodes[nid]
-            results_view.append(
-                ListItem(Label(f"[{nid}] {node.status.icon} {node.title}"))
-            )
+            results_view.add_option(Option(f"[{nid}] {node.status.icon} {node.title}", id=nid))
     
     @on(Input.Submitted)
     def on_search_submit(self, event: Input.Submitted) -> None:
@@ -246,10 +329,10 @@ class SearchScreen(ModalScreen[str | None]):
         else:
             self.dismiss(None)
     
-    @on(ListView.Selected)
-    def on_result_selected(self, event: ListView.Selected) -> None:
-        if event.list_view.index is not None and event.list_view.index < len(self.results):
-            self.dismiss(self.results[event.list_view.index])
+    @on(OptionList.OptionSelected)
+    def on_result_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option.id:
+            self.dismiss(event.option.id)
     
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -259,7 +342,7 @@ class SelectNodeScreen(ModalScreen[str | None]):
     """Modal screen for selecting a node (for move/link operations)."""
     
     BINDINGS = [
-        Binding("escape", "cancel", "Cancel"),
+        Binding("escape", "cancel", "取消"),
     ]
     
     def __init__(self, tree: ExplorationTree, prompt: str, exclude: str | None = None) -> None:
@@ -267,34 +350,30 @@ class SelectNodeScreen(ModalScreen[str | None]):
         self.current_tree = tree
         self.prompt = prompt
         self.exclude = exclude
-        self.node_ids: list[str] = []
     
     def compose(self) -> ComposeResult:
-        yield Container(
-            Label(self.prompt, id="select-prompt"),
-            ListView(id="select-list"),
-            id="select-container",
-        )
-    
-    def on_mount(self) -> None:
-        list_view = self.query_one("#select-list", ListView)
-        
+        # Build options from tree
+        options = []
         for nid, depth in self.current_tree.iter_tree():
             if nid == self.exclude:
                 continue
             node = self.current_tree.nodes[nid]
             indent = "  " * depth
-            self.node_ids.append(nid)
-            list_view.append(
-                ListItem(Label(f"{indent}[{nid}] {node.status.icon} {node.title}"))
-            )
+            options.append(Option(f"{indent}[{nid}] {node.status.icon} {node.title}", id=nid))
         
-        list_view.focus()
+        yield Container(
+            Label(self.prompt, id="select-prompt"),
+            OptionList(*options, id="select-list"),
+            id="select-container",
+            classes="modal-container",
+        )
     
-    @on(ListView.Selected)
-    def on_selected(self, event: ListView.Selected) -> None:
-        if event.list_view.index is not None and event.list_view.index < len(self.node_ids):
-            self.dismiss(self.node_ids[event.list_view.index])
+    def on_mount(self) -> None:
+        self.query_one("#select-list", OptionList).focus()
+    
+    @on(OptionList.OptionSelected)
+    def on_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
     
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -304,46 +383,42 @@ class BacklinksScreen(ModalScreen):
     """Modal screen showing backlinks."""
     
     BINDINGS = [
-        Binding("escape", "dismiss", "Close"),
-        Binding("q", "dismiss", "Close"),
+        Binding("escape", "dismiss", "关闭"),
+        Binding("q", "dismiss", "关闭"),
     ]
     
     def __init__(self, tree: ExplorationTree, node_id: str) -> None:
         super().__init__()
         self.current_tree = tree
         self.node_id = node_id
-        self.backlink_ids: list[str] = []
     
     def compose(self) -> ComposeResult:
         node = self.current_tree.nodes[self.node_id]
+        backlink_ids = self.current_tree.get_backlinks(self.node_id)
+        
+        if backlink_ids:
+            options = [
+                Option(f"[{nid}] {self.current_tree.nodes[nid].status.icon} {self.current_tree.nodes[nid].title}", id=nid)
+                for nid in backlink_ids
+            ]
+        else:
+            options = [Option("(无反向链接)", disabled=True)]
+        
         yield Container(
-            Label(f"Backlinks to [{self.node_id}] {node.title}", id="backlinks-title"),
-            ListView(id="backlinks-list"),
+            Label(f"反向链接: [{self.node_id}] {node.title}", id="backlinks-title"),
+            OptionList(*options, id="backlinks-list"),
             id="backlinks-container",
+            classes="modal-container",
         )
     
     def on_mount(self) -> None:
-        list_view = self.query_one("#backlinks-list", ListView)
-        self.backlink_ids = self.current_tree.get_backlinks(self.node_id)
-        
-        if not self.backlink_ids:
-            list_view.append(ListItem(Label("(no backlinks)")))
-        else:
-            for nid in self.backlink_ids:
-                node = self.current_tree.nodes[nid]
-                list_view.append(
-                    ListItem(Label(f"[{nid}] {node.status.icon} {node.title}"))
-                )
-        
-        list_view.focus()
+        self.query_one("#backlinks-list", OptionList).focus()
     
-    @on(ListView.Selected)
-    def on_selected(self, event: ListView.Selected) -> None:
-        if self.backlink_ids and event.list_view.index is not None:
-            if event.list_view.index < len(self.backlink_ids):
-                # Navigate to the selected backlink
-                self.app.navigate_to(self.backlink_ids[event.list_view.index])
-                self.app.pop_screen()
+    @on(OptionList.OptionSelected)
+    def on_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option.id:
+            self.app.navigate_to(event.option.id)
+            self.app.pop_screen()
     
     def action_dismiss(self) -> None:
         self.app.pop_screen()
@@ -353,8 +428,8 @@ class StatisticsScreen(ModalScreen):
     """Modal screen showing statistics."""
     
     BINDINGS = [
-        Binding("escape", "dismiss", "Close"),
-        Binding("q", "dismiss", "Close"),
+        Binding("escape", "dismiss", "关闭"),
+        Binding("q", "dismiss", "关闭"),
     ]
     
     def __init__(self, tree: ExplorationTree) -> None:
@@ -363,29 +438,76 @@ class StatisticsScreen(ModalScreen):
     
     def compose(self) -> ComposeResult:
         stats = self.current_tree.get_statistics()
-        content = f"""
-# {self.current_tree.name} Statistics
+        content = f"""# {self.current_tree.name} 统计
 
-| Metric | Value |
-|--------|-------|
-| Total nodes | {stats['total']} |
-| ► Active | {stats['active']} |
-| ✓ Done | {stats['done']} |
-| ✗ Dropped | {stats['dropped']} |
-| ? Todo | {stats['todo']} |
-| Leaf nodes | {stats['leaves']} |
-| Max depth | {stats['max_depth']} |
+| 指标 | 数值 |
+|------|------|
+| 总节点数 | {stats['total']} |
+| ► 活跃 | {stats['active']} |
+| ✓ 完成 | {stats['done']} |
+| ✗ 放弃 | {stats['dropped']} |
+| ? 待办 | {stats['todo']} |
+| 叶子节点 | {stats['leaves']} |
+| 最大深度 | {stats['max_depth']} |
 
-Created: {self.current_tree.created.strftime('%Y-%m-%d %H:%M')}
-Updated: {self.current_tree.updated.strftime('%Y-%m-%d %H:%M')}
+**创建时间**: {self.current_tree.created.strftime('%Y-%m-%d %H:%M')}
+
+**更新时间**: {self.current_tree.updated.strftime('%Y-%m-%d %H:%M')}
 """
         yield Container(
             Markdown(content, id="stats-content"),
             id="stats-container",
+            classes="modal-container",
         )
     
     def action_dismiss(self) -> None:
         self.app.pop_screen()
+
+
+class ThemeSelectorScreen(ModalScreen[str | None]):
+    """Modal screen for selecting a theme."""
+    
+    BINDINGS = [
+        Binding("escape", "cancel", "取消"),
+        Binding("q", "cancel", "取消"),
+    ]
+    
+    def __init__(self, current_theme: str) -> None:
+        super().__init__()
+        self.current_theme = current_theme
+    
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Label("选择主题", id="theme-title"),
+            OptionList(
+                *[
+                    Option(
+                        f"{'► ' if name == self.current_theme else '  '}{THEME_DISPLAY_NAMES.get(name, name)}",
+                        id=name,
+                    )
+                    for name in THEME_NAMES
+                ],
+                id="theme-list",
+            ),
+            id="theme-selector",
+            classes="modal-container",
+        )
+    
+    def on_mount(self) -> None:
+        option_list = self.query_one("#theme-list", OptionList)
+        # Highlight current theme
+        for i, name in enumerate(THEME_NAMES):
+            if name == self.current_theme:
+                option_list.highlighted = i
+                break
+        option_list.focus()
+    
+    @on(OptionList.OptionSelected)
+    def on_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
+    
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 # === Main App ===
@@ -393,193 +515,64 @@ Updated: {self.current_tree.updated.strftime('%Y-%m-%d %H:%M')}
 class DelvApp(App):
     """Delv TUI Application."""
     
-    CSS = """
-    /* Layout */
-    #main-container {
-        layout: horizontal;
-    }
+    TITLE = "Delv"
+    SUB_TITLE = "探索树"
     
-    #trees-panel {
-        width: 20%;
-        min-width: 16;
-        border: solid $primary;
-    }
+    # Enable command palette with custom provider
+    COMMANDS = {DelvCommands}
     
-    #nodes-panel {
-        width: 40%;
-        border: solid $primary;
-    }
+    # Enable command palette toggle
+    ENABLE_COMMAND_PALETTE = True
     
-    #content-panel {
-        width: 40%;
-        border: solid $primary;
-    }
-    
-    .panel-title {
-        background: $primary;
-        color: $text;
-        text-align: center;
-        padding: 0 1;
-    }
-    
-    .focused .panel-title {
-        background: $accent;
-    }
-    
-    /* Trees list */
-    #trees-list {
-        height: 100%;
-    }
-    
-    #trees-list > ListItem {
-        padding: 0 1;
-    }
-    
-    #trees-list > ListItem.--highlight {
-        background: $accent;
-    }
-    
-    /* Node tree */
-    #node-tree {
-        height: 100%;
-        scrollbar-gutter: stable;
-    }
-    
-    #node-tree > .tree--cursor {
-        background: $accent;
-    }
-    
-    /* Content panel */
-    #content-scroll {
-        height: 100%;
-        padding: 1;
-    }
-    
-    #node-title {
-        text-style: bold;
-        margin-bottom: 1;
-    }
-    
-    #node-body {
-        margin-bottom: 1;
-    }
-    
-    #links-section {
-        border-top: solid $primary-darken-2;
-        padding-top: 1;
-        margin-top: 1;
-    }
-    
-    /* Modal screens */
-    #input-container, #confirm-container,
-    #search-container, #select-container, #backlinks-container,
-    #stats-container {
-        align: center middle;
-        width: 80%;
-        max-width: 80;
-        height: auto;
-        max-height: 80%;
-        background: $surface;
-        border: thick $primary;
-        padding: 1 2;
-    }
-    
-    #help-container {
-        align: center middle;
-        width: 90%;
-        max-width: 100;
-        height: 90%;
-        background: $surface;
-        border: thick $primary;
-        padding: 1 2;
-    }
-    
-    #help-scroll {
-        height: 100%;
-        scrollbar-gutter: stable;
-    }
-    
-    #help-content {
-        height: auto;
-    }
-    
-    #stats-content {
-        height: auto;
-        max-height: 60;
-        overflow-y: auto;
-    }
-    
-    #input-prompt, #select-prompt, #confirm-message, #backlinks-title {
-        margin-bottom: 1;
-    }
-    
-    #confirm-options {
-        text-align: center;
-        margin-top: 1;
-    }
-    
-    #search-results, #select-list, #backlinks-list {
-        height: auto;
-        max-height: 20;
-        margin-top: 1;
-    }
-    
-    /* Status colors */
-    .status-active { color: $success; }
-    .status-done { color: $primary; }
-    .status-dropped { color: $error; }
-    .status-todo { color: $warning; }
-    
-    /* Focus indicators */
-    .panel:focus-within {
-        border: solid $accent;
-    }
-    """
+    # Load static CSS from file
+    CSS_PATH = "styles.tcss"
     
     BINDINGS = [
-        # Navigation
-        Binding("h", "focus_left", "Left panel", show=False),
-        Binding("l", "focus_right", "Right panel", show=False),
-        Binding("j", "move_down", "Down", show=False),
-        Binding("k", "move_up", "Up", show=False),
-        Binding("enter", "select", "Select", show=False),
-        Binding("backspace", "go_parent", "Parent", show=False),
-        Binding("minus", "go_back", "Back", show=False),
-        Binding("r", "go_root", "Root", show=False),
-        Binding("g", "goto_node", "Goto", show=False),
-        Binding("bracketright", "next_link", "Next link", show=False),
-        Binding("bracketleft", "prev_link", "Prev link", show=False),
+        # Navigation - show key ones in footer
+        Binding("h", "focus_left", "◀ 左", show=False),
+        Binding("l", "focus_right", "右 ▶", show=False),
+        Binding("j", "move_down", "↓", show=False),
+        Binding("k", "move_up", "↑", show=False),
+        Binding("enter", "select", "进入", show=False),
+        Binding("backspace", "go_parent", "返回", show=False),
+        Binding("minus", "go_back", "后退", show=False),
+        Binding("r", "go_root", "根", show=False),
+        Binding("g", "goto_node", "跳转", show=False),
+        Binding("bracketright", "next_link", "下链", show=False),
+        Binding("bracketleft", "prev_link", "上链", show=False),
         
-        # Editing
-        Binding("a", "add_child", "Add child", show=False),
-        Binding("A", "add_sibling", "Add sibling", show=False),
-        Binding("e", "edit_external", "Edit", show=False),
-        Binding("E", "edit_title", "Edit title", show=False),
-        Binding("i", "append_body", "Append", show=False),
-        Binding("d", "mark_done", "Done", show=False),
-        Binding("x", "mark_dropped", "Drop", show=False),
-        Binding("t", "mark_todo", "Todo", show=False),
+        # Editing - show important ones
+        Binding("a", "add_child", "+子节点"),
+        Binding("A", "add_sibling", "+兄弟", show=False),
+        Binding("e", "edit_external", "编辑"),
+        Binding("E", "edit_title", "改标题", show=False),
+        Binding("i", "append_body", "追加", show=False),
+        Binding("d", "mark_done", "完成"),
+        Binding("x", "mark_dropped", "放弃", show=False),
+        Binding("t", "mark_todo", "待办", show=False),
         
         # Links & Structure
-        Binding("L", "add_link", "Add link", show=False),
-        Binding("U", "remove_link", "Remove link", show=False),
-        Binding("B", "show_backlinks", "Backlinks", show=False),
-        Binding("m", "move_node", "Move", show=False),
-        Binding("y", "yank_body", "Yank", show=False),
-        Binding("p", "paste_body", "Paste", show=False),
-        Binding("Y", "yank_id", "Yank ID", show=False),
+        Binding("L", "add_link", "链接", show=False),
+        Binding("U", "remove_link", "删链", show=False),
+        Binding("B", "show_backlinks", "反链", show=False),
+        Binding("m", "move_node", "移动", show=False),
+        Binding("y", "yank_body", "复制", show=False),
+        Binding("p", "paste_body", "粘贴", show=False),
+        Binding("Y", "yank_id", "复制ID", show=False),
         
         # Trees
-        Binding("n", "new_tree", "New tree", show=False),
-        Binding("R", "rename_tree", "Rename", show=False),
-        Binding("D", "delete_tree", "Delete", show=False),
+        Binding("n", "new_tree", "新建", show=False),
+        Binding("R", "rename_tree", "重命名", show=False),
+        Binding("D", "delete_tree", "删除树", show=False),
         
-        # Other
-        Binding("slash", "search", "Search", show=False),
-        Binding("s", "show_stats", "Stats", show=False),
-        Binding("question_mark", "show_help", "Help"),
-        Binding("ctrl+s", "force_save", "Save", show=False),
-        Binding("q", "quit", "Quit"),
+        # Other - show key ones
+        Binding("slash", "search", "搜索"),
+        Binding("s", "show_stats", "统计", show=False),
+        Binding("T", "select_theme", "主题"),
+        Binding("question_mark", "show_help", "?帮助"),
+        Binding("ctrl+p", "command_palette", "命令"),  # Built-in command palette
+        Binding("ctrl+s", "force_save", "保存", show=False),
+        Binding("q", "quit", "退出"),
     ]
     
     def __init__(self) -> None:
@@ -589,26 +582,48 @@ class DelvApp(App):
         self.focus_panel: int = 1  # 0=trees, 1=nodes, 2=content
         self.link_index: int = 0
         self._updating_tree: bool = False  # Prevent recursive updates
+        
+        # Register custom themes
+        for theme in get_themes():
+            self.register_theme(theme)
+        
+        # Load saved theme preference
+        self._config = Config.load()
+        self._theme_name: str = self._config.theme
+        # Ensure theme name has delv- prefix for our custom themes
+        if not self._theme_name.startswith("delv-") and f"delv-{self._theme_name}" in THEME_NAMES:
+            self._theme_name = f"delv-{self._theme_name}"
+        # Set the theme
+        self.theme = self._theme_name
+    
+    def on_mount(self) -> None:
+        self.refresh_trees_list()
+        self.load_current_tree()
+        self.update_focus()
     
     def compose(self) -> ComposeResult:
         yield Header()
         yield Horizontal(
             Vertical(
-                Static("Trees", classes="panel-title"),
-                ListView(id="trees-list"),
+                Static("树", classes="panel-title"),
+                OptionList(id="trees-list"),
                 id="trees-panel",
                 classes="panel",
             ),
             Vertical(
-                Static("Nodes", classes="panel-title"),
+                Static("节点", classes="panel-title"),
                 Tree("root", id="node-tree"),
                 id="nodes-panel",
                 classes="panel",
             ),
             Vertical(
-                Static("Content", classes="panel-title"),
-                Container(
-                    Static("", id="node-title"),
+                Static("内容", classes="panel-title"),
+                VerticalScroll(
+                    Container(
+                        Static("", id="node-title"),
+                        Static("", id="node-meta"),
+                        id="node-header",
+                    ),
                     Markdown("", id="node-body"),
                     Static("", id="links-section"),
                     id="content-scroll",
@@ -620,21 +635,17 @@ class DelvApp(App):
         )
         yield Footer()
     
-    def on_mount(self) -> None:
-        self.refresh_trees_list()
-        self.load_current_tree()
-        self.update_focus()
     
     def refresh_trees_list(self) -> None:
         """Refresh the trees list."""
         self.current_trees_list = list_trees()
-        trees_view = self.query_one("#trees-list", ListView)
-        trees_view.clear()
+        trees_view = self.query_one("#trees-list", OptionList)
+        trees_view.clear_options()
         
         current_name = get_current_tree_name()
         for name in self.current_trees_list:
             prefix = "► " if name == current_name else "  "
-            trees_view.append(ListItem(Label(f"{prefix}{name}")))
+            trees_view.add_option(Option(f"{prefix}{name}", id=name))
     
     def load_current_tree(self) -> None:
         """Load the current tree."""
@@ -660,7 +671,7 @@ class DelvApp(App):
             tree_widget.clear()
             
             if not self.current_tree:
-                tree_widget.root.set_label("(no tree loaded)")
+                tree_widget.root.set_label("(未加载树)")
                 return
             
             root_node = self.current_tree.nodes["root"]
@@ -678,11 +689,17 @@ class DelvApp(App):
     def _format_node_label(self, node: Node) -> str:
         """Format a node label for the tree."""
         status_icon = node.status.icon
-        current_marker = " ←" if self.current_tree and node.id == self.current_tree.current else ""
+        is_current = self.current_tree and node.id == self.current_tree.current
         
         if node.id == "root":
-            return f"root: {node.title}{current_marker}"
-        return f"[{node.id}] {status_icon} {node.title}{current_marker}"
+            label = f"root: {node.title}"
+        else:
+            label = f"[{node.id}] {status_icon} {node.title}"
+        
+        # Add current marker with emphasis
+        if is_current:
+            return f"● {label}"
+        return f"  {label}"
     
     def _add_children_to_tree(self, parent: TreeNode, node_id: str) -> None:
         """Recursively add children to tree widget."""
@@ -716,32 +733,41 @@ class DelvApp(App):
     def refresh_content(self) -> None:
         """Refresh the content panel."""
         title_widget = self.query_one("#node-title", Static)
+        meta_widget = self.query_one("#node-meta", Static)
         body_widget = self.query_one("#node-body", Markdown)
         links_widget = self.query_one("#links-section", Static)
         
         if not self.current_tree:
-            title_widget.update("No tree loaded")
-            body_widget.update("")
+            title_widget.update("未加载树")
+            meta_widget.update("")
+            body_widget.update("使用 `n` 新建树，或从左侧选择")
             links_widget.update("")
             return
         
         node = self.current_tree.get_current_node()
         
-        # Title
-        title_widget.update(f"[{node.id}] {node.status.icon} {node.title} ({node.status.value})")
+        # Title with status icon
+        status_class = f"status-{node.status.value}"
+        title_widget.update(f"{node.status.icon} {node.title}")
+        
+        # Meta info
+        meta_widget.update(f"[{node.id}] · {node.status.value}")
         
         # Body
-        body_widget.update(node.body if node.body else "*empty*")
+        if node.body:
+            body_widget.update(node.body)
+        else:
+            body_widget.update("*空*")
         
         # Links
-        links_text = ""
+        links_parts = []
         if node.links:
             link_strs = []
             for lid in node.links:
                 link_node = self.current_tree.nodes.get(lid)
                 if link_node:
                     link_strs.append(f"[{lid}] {link_node.title}")
-            links_text += "→ Links: " + ", ".join(link_strs) + "\n"
+            links_parts.append("→ " + ", ".join(link_strs))
         
         backlinks = self.current_tree.get_backlinks(node.id)
         if backlinks:
@@ -750,25 +776,19 @@ class DelvApp(App):
                 bl_node = self.current_tree.nodes.get(blid)
                 if bl_node:
                     bl_strs.append(f"[{blid}] {bl_node.title}")
-            links_text += "← Backlinks: " + ", ".join(bl_strs)
+            links_parts.append("← " + ", ".join(bl_strs))
         
-        links_widget.update(links_text)
+        links_widget.update("\n".join(links_parts) if links_parts else "")
     
     def update_focus(self) -> None:
-        """Update visual focus indicators."""
-        panels = ["#trees-panel", "#nodes-panel", "#content-panel"]
-        for i, panel_id in enumerate(panels):
-            panel = self.query_one(panel_id)
-            if i == self.focus_panel:
-                panel.add_class("focused")
-            else:
-                panel.remove_class("focused")
-        
-        # Actually focus the widget
+        """Focus the appropriate widget based on focus_panel."""
+        # CSS :focus-within handles visual styling automatically
         if self.focus_panel == 0:
-            self.query_one("#trees-list", ListView).focus()
+            self.query_one("#trees-list", OptionList).focus()
         elif self.focus_panel == 1:
             self.query_one("#node-tree", Tree).focus()
+        elif self.focus_panel == 2:
+            self.query_one("#content-scroll", VerticalScroll).focus()
     
     def save_tree(self) -> None:
         """Save the current tree."""
@@ -808,32 +828,37 @@ class DelvApp(App):
     
     def action_move_down(self) -> None:
         if self.focus_panel == 0:
-            self.query_one("#trees-list", ListView).action_cursor_down()
+            self.query_one("#trees-list", OptionList).action_cursor_down()
         elif self.focus_panel == 1:
             self.query_one("#node-tree", Tree).action_cursor_down()
     
     def action_move_up(self) -> None:
         if self.focus_panel == 0:
-            self.query_one("#trees-list", ListView).action_cursor_up()
+            self.query_one("#trees-list", OptionList).action_cursor_up()
         elif self.focus_panel == 1:
             self.query_one("#node-tree", Tree).action_cursor_up()
     
     def action_select(self) -> None:
         if self.focus_panel == 0:
-            # Select tree
-            trees_view = self.query_one("#trees-list", ListView)
-            if trees_view.index is not None and trees_view.index < len(self.current_trees_list):
-                name = self.current_trees_list[trees_view.index]
-                set_current_tree_name(name)
-                self.load_current_tree()
-                self.refresh_trees_list()
-                self.focus_panel = 1
-                self.update_focus()
+            # Select tree - handled by OptionList.OptionSelected event
+            trees_view = self.query_one("#trees-list", OptionList)
+            if trees_view.highlighted is not None:
+                option = trees_view.get_option_at_index(trees_view.highlighted)
+                if option.id:
+                    self._select_tree(option.id)
         elif self.focus_panel == 1:
             # Enter node
             tree_widget = self.query_one("#node-tree", Tree)
             if tree_widget.cursor_node and tree_widget.cursor_node.data:
                 self.navigate_to(tree_widget.cursor_node.data)
+    
+    def _select_tree(self, name: str) -> None:
+        """Select a tree by name."""
+        set_current_tree_name(name)
+        self.load_current_tree()
+        self.refresh_trees_list()
+        self.focus_panel = 1
+        self.update_focus()
     
     def action_go_parent(self) -> None:
         if self.current_tree and self.current_tree.go_up():
@@ -854,11 +879,14 @@ class DelvApp(App):
             self.refresh_node_tree()
             self.refresh_content()
     
+    @work
     async def action_goto_node(self) -> None:
         if not self.current_tree:
             return
         
-        result = await self.push_screen_wait(InputScreen("Go to node ID:"))
+        # Use NodeIdSuggester for autocomplete
+        suggester = NodeIdSuggester(self.current_tree)
+        result = await self.push_screen_wait(InputScreen("跳转到节点 ID:", suggester=suggester))
         if result and result in self.current_tree.nodes:
             self.navigate_to(result)
     
@@ -880,22 +908,24 @@ class DelvApp(App):
             self.link_index = (self.link_index - 1) % len(node.links)
             self.navigate_to(node.links[self.link_index])
     
+    @work
     async def action_add_child(self) -> None:
         if not self.current_tree:
             return
         
-        result = await self.push_screen_wait(InputScreen("New child title:"))
+        result = await self.push_screen_wait(InputScreen("新子节点标题:"))
         if result:
             self.current_tree.add_child(self.current_tree.current, result)
             self.save_tree()
             self.refresh_node_tree()
             self.refresh_content()
     
+    @work
     async def action_add_sibling(self) -> None:
         if not self.current_tree or self.current_tree.current == "root":
             return
         
-        result = await self.push_screen_wait(InputScreen("New sibling title:"))
+        result = await self.push_screen_wait(InputScreen("新兄弟节点标题:"))
         if result:
             self.current_tree.add_sibling(self.current_tree.current, result)
             self.save_tree()
@@ -906,89 +936,38 @@ class DelvApp(App):
         if not self.current_tree:
             return
         
-        node = self.current_tree.get_current_node()
+        node_id = self.current_tree.current
         
-        # Create temp file
-        links_str = ", ".join(node.links) if node.links else ""
-        content = f"""---
-title: {node.title}
-status: {node.status.value}
-links: [{links_str}]
----
-
-{node.body}"""
+        with self.suspend():
+            try:
+                edit_node_interactive(self.current_tree, node_id)
+            except ValueError as e:
+                self.notify(str(e), severity="error")
+                return
         
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as f:
-            f.write(content)
-            temp_path = Path(f.name)
-        
-        try:
-            editor = get_editor()
-            # Suspend TUI and run editor
-            with self.suspend():
-                subprocess.run([editor, str(temp_path)], check=True)
-            
-            # Parse result
-            new_content = temp_path.read_text(encoding="utf-8")
-            
-            if new_content.startswith("---"):
-                parts = new_content.split("---", 2)
-                if len(parts) >= 3:
-                    frontmatter = parts[1].strip()
-                    body = parts[2].strip()
-                    
-                    title = node.title
-                    status = node.status
-                    links = node.links
-                    
-                    for line in frontmatter.split("\n"):
-                        if ":" in line:
-                            key, value = line.split(":", 1)
-                            key = key.strip()
-                            value = value.strip()
-                            
-                            if key == "title":
-                                title = value
-                            elif key == "status":
-                                try:
-                                    status = NodeStatus(value)
-                                except ValueError:
-                                    pass
-                            elif key == "links":
-                                value = value.strip("[]")
-                                if value:
-                                    links = [l.strip() for l in value.split(",") if l.strip()]
-                                else:
-                                    links = []
-                    
-                    self.current_tree.update_node(node.id, title=title, body=body, status=status, links=links)
-            else:
-                self.current_tree.update_node(node.id, body=new_content.strip())
-            
-            self.save_tree()
-            self.refresh_node_tree()
-            self.refresh_content()
-        
-        finally:
-            temp_path.unlink()
+        self.save_tree()
+        self.refresh_node_tree()
+        self.refresh_content()
     
+    @work
     async def action_edit_title(self) -> None:
         if not self.current_tree:
             return
         
         node = self.current_tree.get_current_node()
-        result = await self.push_screen_wait(InputScreen("Edit title:", node.title))
+        result = await self.push_screen_wait(InputScreen("编辑标题:", node.title))
         if result:
             self.current_tree.update_node(node.id, title=result)
             self.save_tree()
             self.refresh_node_tree()
             self.refresh_content()
     
+    @work
     async def action_append_body(self) -> None:
         if not self.current_tree:
             return
         
-        result = await self.push_screen_wait(InputScreen("Append to body:"))
+        result = await self.push_screen_wait(InputScreen("追加内容:"))
         if result:
             self.current_tree.append_body(self.current_tree.current, result)
             self.save_tree()
@@ -1002,6 +981,7 @@ links: [{links_str}]
         self.save_tree()
         self.refresh_node_tree()
         self.refresh_content()
+        self.notify("✓ 已完成", timeout=1.5)
     
     def action_mark_dropped(self) -> None:
         if not self.current_tree:
@@ -1011,6 +991,7 @@ links: [{links_str}]
         self.save_tree()
         self.refresh_node_tree()
         self.refresh_content()
+        self.notify("✗ 已放弃", timeout=1.5)
     
     def action_mark_todo(self) -> None:
         if not self.current_tree:
@@ -1020,19 +1001,22 @@ links: [{links_str}]
         self.save_tree()
         self.refresh_node_tree()
         self.refresh_content()
+        self.notify("? 待办", timeout=1.5)
     
+    @work
     async def action_add_link(self) -> None:
         if not self.current_tree:
             return
         
         result = await self.push_screen_wait(
-            SelectNodeScreen(self.current_tree, "Select link target:", self.current_tree.current)
+            SelectNodeScreen(self.current_tree, "选择链接目标:", self.current_tree.current)
         )
         if result:
             self.current_tree.add_link(self.current_tree.current, result)
             self.save_tree()
             self.refresh_content()
     
+    @work
     async def action_remove_link(self) -> None:
         if not self.current_tree:
             return
@@ -1041,7 +1025,7 @@ links: [{links_str}]
         if not node.links:
             return
         
-        result = await self.push_screen_wait(InputScreen("Remove link to node ID:"))
+        result = await self.push_screen_wait(InputScreen("移除链接到节点 ID:"))
         if result and result in node.links:
             self.current_tree.remove_link(node.id, result)
             self.save_tree()
@@ -1053,12 +1037,13 @@ links: [{links_str}]
         
         self.push_screen(BacklinksScreen(self.current_tree, self.current_tree.current))
     
+    @work
     async def action_move_node(self) -> None:
         if not self.current_tree or self.current_tree.current == "root":
             return
         
         result = await self.push_screen_wait(
-            SelectNodeScreen(self.current_tree, f"Move [{self.current_tree.current}] to:", self.current_tree.current)
+            SelectNodeScreen(self.current_tree, f"移动 [{self.current_tree.current}] 到:", self.current_tree.current)
         )
         if result:
             try:
@@ -1075,9 +1060,9 @@ links: [{links_str}]
         node = self.current_tree.get_current_node()
         try:
             pyperclip.copy(node.body)
-            self.notify("Copied body to clipboard")
+            self.notify("已复制内容", timeout=1.5)
         except Exception:
-            self.notify("Clipboard not available", severity="warning")
+            self.notify("剪贴板不可用", severity="warning")
     
     def action_paste_body(self) -> None:
         if not self.current_tree:
@@ -1088,9 +1073,9 @@ links: [{links_str}]
             self.current_tree.append_body(self.current_tree.current, text)
             self.save_tree()
             self.refresh_content()
-            self.notify("Pasted to body")
+            self.notify("已粘贴", timeout=1.5)
         except Exception:
-            self.notify("Clipboard not available", severity="warning")
+            self.notify("剪贴板不可用", severity="warning")
     
     def action_yank_id(self) -> None:
         if not self.current_tree:
@@ -1098,32 +1083,34 @@ links: [{links_str}]
         
         try:
             pyperclip.copy(self.current_tree.current)
-            self.notify(f"Copied [{self.current_tree.current}] to clipboard")
+            self.notify(f"已复制 [{self.current_tree.current}]", timeout=1.5)
         except Exception:
-            self.notify("Clipboard not available", severity="warning")
+            self.notify("剪贴板不可用", severity="warning")
     
+    @work
     async def action_new_tree(self) -> None:
-        result = await self.push_screen_wait(InputScreen("New tree name:"))
+        result = await self.push_screen_wait(InputScreen("新建树名称:"))
         if result:
             if tree_exists(result):
-                self.notify(f"Tree '{result}' already exists", severity="error")
+                self.notify(f"树 '{result}' 已存在", severity="error")
                 return
             
-            tree = ExplorationTree.create(result, "Root")
+            tree = ExplorationTree.create(result, "根节点")
             save_tree(tree, backup=False)
             set_current_tree_name(result)
             self.load_current_tree()
             self.refresh_trees_list()
-            self.notify(f"Created tree '{result}'")
+            self.notify(f"已创建 '{result}'", timeout=2)
     
+    @work
     async def action_rename_tree(self) -> None:
         if not self.current_tree:
             return
         
-        result = await self.push_screen_wait(InputScreen("New name:", self.current_tree.name))
+        result = await self.push_screen_wait(InputScreen("新名称:", self.current_tree.name))
         if result and result != self.current_tree.name:
             if tree_exists(result):
-                self.notify(f"Tree '{result}' already exists", severity="error")
+                self.notify(f"树 '{result}' 已存在", severity="error")
                 return
             
             old_name = self.current_tree.name
@@ -1132,16 +1119,17 @@ links: [{links_str}]
                 set_current_tree_name(result)
                 self.load_current_tree()
                 self.refresh_trees_list()
-                self.notify(f"Renamed to '{result}'")
+                self.notify(f"已重命名为 '{result}'", timeout=2)
             except Exception as e:
                 self.notify(str(e), severity="error")
     
+    @work
     async def action_delete_tree(self) -> None:
         if not self.current_tree:
             return
         
         confirmed = await self.push_screen_wait(
-            ConfirmScreen(f"Delete tree '{self.current_tree.name}'?")
+            ConfirmScreen(f"删除树 '{self.current_tree.name}'?")
         )
         if confirmed:
             name = self.current_tree.name
@@ -1151,8 +1139,9 @@ links: [{links_str}]
             self.refresh_trees_list()
             self.refresh_node_tree()
             self.refresh_content()
-            self.notify(f"Deleted tree '{name}'")
+            self.notify(f"已删除 '{name}'", timeout=2)
     
+    @work
     async def action_search(self) -> None:
         if not self.current_tree:
             return
@@ -1170,9 +1159,21 @@ links: [{links_str}]
     def action_show_help(self) -> None:
         self.push_screen(HelpScreen())
     
+    @work
+    async def action_select_theme(self) -> None:
+        result = await self.push_screen_wait(ThemeSelectorScreen(self._theme_name))
+        if result and result != self._theme_name:
+            self._theme_name = result
+            self._config.theme = result
+            self._config.save()
+            # Hot reload theme using Textual's built-in mechanism
+            self.theme = result
+            display_name = THEME_DISPLAY_NAMES.get(result, result)
+            self.notify(f"主题已切换: {display_name}", timeout=2)
+    
     def action_force_save(self) -> None:
         self.save_tree()
-        self.notify("Saved")
+        self.notify("已保存", timeout=1.5)
     
     @on(Tree.NodeHighlighted)
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
@@ -1191,16 +1192,11 @@ links: [{links_str}]
                 finally:
                     self._updating_tree = False
     
-    @on(ListView.Selected, "#trees-list")
-    def on_tree_list_selected(self, event: ListView.Selected) -> None:
+    @on(OptionList.OptionSelected, "#trees-list")
+    def on_tree_list_selected(self, event: OptionList.OptionSelected) -> None:
         """Handle tree list selection."""
-        if event.list_view.index is not None and event.list_view.index < len(self.current_trees_list):
-            name = self.current_trees_list[event.list_view.index]
-            set_current_tree_name(name)
-            self.load_current_tree()
-            self.refresh_trees_list()
-            self.focus_panel = 1
-            self.update_focus()
+        if event.option.id:
+            self._select_tree(event.option.id)
 
 
 def run_tui() -> None:
@@ -1211,4 +1207,3 @@ def run_tui() -> None:
 
 if __name__ == "__main__":
     run_tui()
-
