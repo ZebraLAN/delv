@@ -1,5 +1,7 @@
 """TUI interface for Delv using Textual."""
 
+from __future__ import annotations
+
 import subprocess
 import tempfile
 from pathlib import Path
@@ -44,11 +46,20 @@ class HelpScreen(ModalScreen):
     BINDINGS = [
         Binding("escape", "dismiss", "Close"),
         Binding("q", "dismiss", "Close"),
+        Binding("j", "scroll_down", "Scroll down", show=False),
+        Binding("k", "scroll_up", "Scroll up", show=False),
+        Binding("down", "scroll_down", "Scroll down", show=False),
+        Binding("up", "scroll_up", "Scroll up", show=False),
+        Binding("pagedown", "page_down", "Page down", show=False),
+        Binding("pageup", "page_up", "Page up", show=False),
+        Binding("g", "scroll_top", "Top", show=False),
+        Binding("G", "scroll_bottom", "Bottom", show=False),
     ]
     
     def compose(self) -> ComposeResult:
-        help_text = """
-# Delv - Keyboard Shortcuts
+        help_text = """# Delv - Keyboard Shortcuts
+
+**Navigation:** `j/k` scroll, `q/Esc` close
 
 ## Navigation
 | Key | Action |
@@ -101,13 +112,35 @@ class HelpScreen(ModalScreen):
 | `q` | Quit |
 | `Ctrl+S` | Force save |
 """
+        from textual.containers import VerticalScroll
         yield Container(
-            Markdown(help_text, id="help-content"),
+            VerticalScroll(
+                Markdown(help_text, id="help-content"),
+                id="help-scroll",
+            ),
             id="help-container",
         )
     
     def action_dismiss(self) -> None:
         self.app.pop_screen()
+    
+    def action_scroll_down(self) -> None:
+        self.query_one("#help-scroll").scroll_down()
+    
+    def action_scroll_up(self) -> None:
+        self.query_one("#help-scroll").scroll_up()
+    
+    def action_page_down(self) -> None:
+        self.query_one("#help-scroll").scroll_page_down()
+    
+    def action_page_up(self) -> None:
+        self.query_one("#help-scroll").scroll_page_up()
+    
+    def action_scroll_top(self) -> None:
+        self.query_one("#help-scroll").scroll_home()
+    
+    def action_scroll_bottom(self) -> None:
+        self.query_one("#help-scroll").scroll_end()
 
 
 class InputScreen(ModalScreen[str | None]):
@@ -176,7 +209,7 @@ class SearchScreen(ModalScreen[str | None]):
     
     def __init__(self, tree: ExplorationTree) -> None:
         super().__init__()
-        self.tree = tree
+        self.current_tree = tree
         self.results: list[str] = []
     
     def compose(self) -> ComposeResult:
@@ -199,9 +232,9 @@ class SearchScreen(ModalScreen[str | None]):
             self.results = []
             return
         
-        self.results = self.tree.search(query)
+        self.results = self.current_tree.search(query)
         for nid in self.results[:20]:  # Limit to 20 results
-            node = self.tree.nodes[nid]
+            node = self.current_tree.nodes[nid]
             results_view.append(
                 ListItem(Label(f"[{nid}] {node.status.icon} {node.title}"))
             )
@@ -231,7 +264,7 @@ class SelectNodeScreen(ModalScreen[str | None]):
     
     def __init__(self, tree: ExplorationTree, prompt: str, exclude: str | None = None) -> None:
         super().__init__()
-        self.tree = tree
+        self.current_tree = tree
         self.prompt = prompt
         self.exclude = exclude
         self.node_ids: list[str] = []
@@ -246,10 +279,10 @@ class SelectNodeScreen(ModalScreen[str | None]):
     def on_mount(self) -> None:
         list_view = self.query_one("#select-list", ListView)
         
-        for nid, depth in self.tree.iter_tree():
+        for nid, depth in self.current_tree.iter_tree():
             if nid == self.exclude:
                 continue
-            node = self.tree.nodes[nid]
+            node = self.current_tree.nodes[nid]
             indent = "  " * depth
             self.node_ids.append(nid)
             list_view.append(
@@ -277,12 +310,12 @@ class BacklinksScreen(ModalScreen):
     
     def __init__(self, tree: ExplorationTree, node_id: str) -> None:
         super().__init__()
-        self.tree = tree
+        self.current_tree = tree
         self.node_id = node_id
         self.backlink_ids: list[str] = []
     
     def compose(self) -> ComposeResult:
-        node = self.tree.nodes[self.node_id]
+        node = self.current_tree.nodes[self.node_id]
         yield Container(
             Label(f"Backlinks to [{self.node_id}] {node.title}", id="backlinks-title"),
             ListView(id="backlinks-list"),
@@ -291,13 +324,13 @@ class BacklinksScreen(ModalScreen):
     
     def on_mount(self) -> None:
         list_view = self.query_one("#backlinks-list", ListView)
-        self.backlink_ids = self.tree.get_backlinks(self.node_id)
+        self.backlink_ids = self.current_tree.get_backlinks(self.node_id)
         
         if not self.backlink_ids:
             list_view.append(ListItem(Label("(no backlinks)")))
         else:
             for nid in self.backlink_ids:
-                node = self.tree.nodes[nid]
+                node = self.current_tree.nodes[nid]
                 list_view.append(
                     ListItem(Label(f"[{nid}] {node.status.icon} {node.title}"))
                 )
@@ -326,12 +359,12 @@ class StatisticsScreen(ModalScreen):
     
     def __init__(self, tree: ExplorationTree) -> None:
         super().__init__()
-        self.tree = tree
+        self.current_tree = tree
     
     def compose(self) -> ComposeResult:
-        stats = self.tree.get_statistics()
+        stats = self.current_tree.get_statistics()
         content = f"""
-# {self.tree.name} Statistics
+# {self.current_tree.name} Statistics
 
 | Metric | Value |
 |--------|-------|
@@ -343,8 +376,8 @@ class StatisticsScreen(ModalScreen):
 | Leaf nodes | {stats['leaves']} |
 | Max depth | {stats['max_depth']} |
 
-Created: {self.tree.created.strftime('%Y-%m-%d %H:%M')}
-Updated: {self.tree.updated.strftime('%Y-%m-%d %H:%M')}
+Created: {self.current_tree.created.strftime('%Y-%m-%d %H:%M')}
+Updated: {self.current_tree.updated.strftime('%Y-%m-%d %H:%M')}
 """
         yield Container(
             Markdown(content, id="stats-content"),
@@ -438,7 +471,7 @@ class DelvApp(App):
     }
     
     /* Modal screens */
-    #help-container, #input-container, #confirm-container,
+    #input-container, #confirm-container,
     #search-container, #select-container, #backlinks-container,
     #stats-container {
         align: center middle;
@@ -451,7 +484,26 @@ class DelvApp(App):
         padding: 1 2;
     }
     
-    #help-content, #stats-content {
+    #help-container {
+        align: center middle;
+        width: 90%;
+        max-width: 100;
+        height: 90%;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+    }
+    
+    #help-scroll {
+        height: 100%;
+        scrollbar-gutter: stable;
+    }
+    
+    #help-content {
+        height: auto;
+    }
+    
+    #stats-content {
         height: auto;
         max-height: 60;
         overflow-y: auto;
@@ -532,10 +584,11 @@ class DelvApp(App):
     
     def __init__(self) -> None:
         super().__init__()
-        self.tree: ExplorationTree | None = None
-        self.trees_list: list[str] = []
+        self.current_tree: ExplorationTree | None = None
+        self.current_trees_list: list[str] = []
         self.focus_panel: int = 1  # 0=trees, 1=nodes, 2=content
         self.link_index: int = 0
+        self._updating_tree: bool = False  # Prevent recursive updates
     
     def compose(self) -> ComposeResult:
         yield Header()
@@ -574,12 +627,12 @@ class DelvApp(App):
     
     def refresh_trees_list(self) -> None:
         """Refresh the trees list."""
-        self.trees_list = list_trees()
+        self.current_trees_list = list_trees()
         trees_view = self.query_one("#trees-list", ListView)
         trees_view.clear()
         
         current_name = get_current_tree_name()
-        for name in self.trees_list:
+        for name in self.current_trees_list:
             prefix = "► " if name == current_name else "  "
             trees_view.append(ListItem(Label(f"{prefix}{name}")))
     
@@ -588,39 +641,44 @@ class DelvApp(App):
         name = get_current_tree_name()
         if name and tree_exists(name):
             try:
-                self.tree = load_tree(name)
+                self.current_tree = load_tree(name)
                 self.refresh_node_tree()
                 self.refresh_content()
             except Exception:
-                self.tree = None
+                self.current_tree = None
         else:
-            self.tree = None
+            self.current_tree = None
             self.refresh_node_tree()
             self.refresh_content()
     
     def refresh_node_tree(self) -> None:
         """Refresh the node tree display."""
-        tree_widget = self.query_one("#node-tree", Tree)
-        tree_widget.clear()
-        
-        if not self.tree:
-            tree_widget.root.set_label("(no tree loaded)")
-            return
-        
-        root_node = self.tree.nodes["root"]
-        tree_widget.root.set_label(self._format_node_label(root_node))
-        tree_widget.root.data = "root"
-        
-        self._add_children_to_tree(tree_widget.root, "root")
-        tree_widget.root.expand_all()
-        
-        # Select current node
-        self._select_tree_node(self.tree.current)
+        was_updating = self._updating_tree
+        self._updating_tree = True
+        try:
+            tree_widget = self.query_one("#node-tree", Tree)
+            tree_widget.clear()
+            
+            if not self.current_tree:
+                tree_widget.root.set_label("(no tree loaded)")
+                return
+            
+            root_node = self.current_tree.nodes["root"]
+            tree_widget.root.set_label(self._format_node_label(root_node))
+            tree_widget.root.data = "root"
+            
+            self._add_children_to_tree(tree_widget.root, "root")
+            tree_widget.root.expand_all()
+            
+            # Select current node
+            self._select_tree_node(self.current_tree.current)
+        finally:
+            self._updating_tree = was_updating
     
     def _format_node_label(self, node: Node) -> str:
         """Format a node label for the tree."""
         status_icon = node.status.icon
-        current_marker = " ←" if self.tree and node.id == self.tree.current else ""
+        current_marker = " ←" if self.current_tree and node.id == self.current_tree.current else ""
         
         if node.id == "root":
             return f"root: {node.title}{current_marker}"
@@ -628,12 +686,12 @@ class DelvApp(App):
     
     def _add_children_to_tree(self, parent: TreeNode, node_id: str) -> None:
         """Recursively add children to tree widget."""
-        if not self.tree:
+        if not self.current_tree:
             return
         
-        node = self.tree.nodes[node_id]
+        node = self.current_tree.nodes[node_id]
         for child_id in node.children:
-            child = self.tree.nodes[child_id]
+            child = self.current_tree.nodes[child_id]
             child_tree_node = parent.add(self._format_node_label(child), data=child_id)
             self._add_children_to_tree(child_tree_node, child_id)
     
@@ -661,13 +719,13 @@ class DelvApp(App):
         body_widget = self.query_one("#node-body", Markdown)
         links_widget = self.query_one("#links-section", Static)
         
-        if not self.tree:
+        if not self.current_tree:
             title_widget.update("No tree loaded")
             body_widget.update("")
             links_widget.update("")
             return
         
-        node = self.tree.get_current_node()
+        node = self.current_tree.get_current_node()
         
         # Title
         title_widget.update(f"[{node.id}] {node.status.icon} {node.title} ({node.status.value})")
@@ -680,16 +738,16 @@ class DelvApp(App):
         if node.links:
             link_strs = []
             for lid in node.links:
-                link_node = self.tree.nodes.get(lid)
+                link_node = self.current_tree.nodes.get(lid)
                 if link_node:
                     link_strs.append(f"[{lid}] {link_node.title}")
             links_text += "→ Links: " + ", ".join(link_strs) + "\n"
         
-        backlinks = self.tree.get_backlinks(node.id)
+        backlinks = self.current_tree.get_backlinks(node.id)
         if backlinks:
             bl_strs = []
             for blid in backlinks:
-                bl_node = self.tree.nodes.get(blid)
+                bl_node = self.current_tree.nodes.get(blid)
                 if bl_node:
                     bl_strs.append(f"[{blid}] {bl_node.title}")
             links_text += "← Backlinks: " + ", ".join(bl_strs)
@@ -714,17 +772,27 @@ class DelvApp(App):
     
     def save_tree(self) -> None:
         """Save the current tree."""
-        if self.tree:
-            save_tree(self.tree)
+        if self.current_tree:
+            save_tree(self.current_tree)
     
     def navigate_to(self, node_id: str) -> None:
         """Navigate to a node."""
-        if self.tree and node_id in self.tree.nodes:
-            self.tree.go_to(node_id)
-            self.save_tree()
-            self.refresh_node_tree()
-            self.refresh_content()
-            self.link_index = 0
+        if self._updating_tree:
+            return
+        if self.current_tree and node_id in self.current_tree.nodes:
+            if self.current_tree.current == node_id:
+                # Already at this node, just update content
+                self.refresh_content()
+                return
+            self._updating_tree = True
+            try:
+                self.current_tree.go_to(node_id)
+                self.save_tree()
+                self.refresh_node_tree()
+                self.refresh_content()
+                self.link_index = 0
+            finally:
+                self._updating_tree = False
     
     # === Actions ===
     
@@ -754,8 +822,8 @@ class DelvApp(App):
         if self.focus_panel == 0:
             # Select tree
             trees_view = self.query_one("#trees-list", ListView)
-            if trees_view.index is not None and trees_view.index < len(self.trees_list):
-                name = self.trees_list[trees_view.index]
+            if trees_view.index is not None and trees_view.index < len(self.current_trees_list):
+                name = self.current_trees_list[trees_view.index]
                 set_current_tree_name(name)
                 self.load_current_tree()
                 self.refresh_trees_list()
@@ -768,77 +836,77 @@ class DelvApp(App):
                 self.navigate_to(tree_widget.cursor_node.data)
     
     def action_go_parent(self) -> None:
-        if self.tree and self.tree.go_up():
+        if self.current_tree and self.current_tree.go_up():
             self.save_tree()
             self.refresh_node_tree()
             self.refresh_content()
     
     def action_go_back(self) -> None:
-        if self.tree and self.tree.go_back():
+        if self.current_tree and self.current_tree.go_back():
             self.save_tree()
             self.refresh_node_tree()
             self.refresh_content()
     
     def action_go_root(self) -> None:
-        if self.tree:
-            self.tree.go_root()
+        if self.current_tree:
+            self.current_tree.go_root()
             self.save_tree()
             self.refresh_node_tree()
             self.refresh_content()
     
     async def action_goto_node(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
         result = await self.push_screen_wait(InputScreen("Go to node ID:"))
-        if result and result in self.tree.nodes:
+        if result and result in self.current_tree.nodes:
             self.navigate_to(result)
     
     def action_next_link(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
-        node = self.tree.get_current_node()
+        node = self.current_tree.get_current_node()
         if node.links:
             self.link_index = (self.link_index + 1) % len(node.links)
             self.navigate_to(node.links[self.link_index])
     
     def action_prev_link(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
-        node = self.tree.get_current_node()
+        node = self.current_tree.get_current_node()
         if node.links:
             self.link_index = (self.link_index - 1) % len(node.links)
             self.navigate_to(node.links[self.link_index])
     
     async def action_add_child(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
         result = await self.push_screen_wait(InputScreen("New child title:"))
         if result:
-            self.tree.add_child(self.tree.current, result)
+            self.current_tree.add_child(self.current_tree.current, result)
             self.save_tree()
             self.refresh_node_tree()
             self.refresh_content()
     
     async def action_add_sibling(self) -> None:
-        if not self.tree or self.tree.current == "root":
+        if not self.current_tree or self.current_tree.current == "root":
             return
         
         result = await self.push_screen_wait(InputScreen("New sibling title:"))
         if result:
-            self.tree.add_sibling(self.tree.current, result)
+            self.current_tree.add_sibling(self.current_tree.current, result)
             self.save_tree()
             self.refresh_node_tree()
             self.refresh_content()
     
     def action_edit_external(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
-        node = self.tree.get_current_node()
+        node = self.current_tree.get_current_node()
         
         # Create temp file
         links_str = ", ".join(node.links) if node.links else ""
@@ -893,9 +961,9 @@ links: [{links_str}]
                                 else:
                                     links = []
                     
-                    self.tree.update_node(node.id, title=title, body=body, status=status, links=links)
+                    self.current_tree.update_node(node.id, title=title, body=body, status=status, links=links)
             else:
-                self.tree.update_node(node.id, body=new_content.strip())
+                self.current_tree.update_node(node.id, body=new_content.strip())
             
             self.save_tree()
             self.refresh_node_tree()
@@ -905,106 +973,106 @@ links: [{links_str}]
             temp_path.unlink()
     
     async def action_edit_title(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
-        node = self.tree.get_current_node()
+        node = self.current_tree.get_current_node()
         result = await self.push_screen_wait(InputScreen("Edit title:", node.title))
         if result:
-            self.tree.update_node(node.id, title=result)
+            self.current_tree.update_node(node.id, title=result)
             self.save_tree()
             self.refresh_node_tree()
             self.refresh_content()
     
     async def action_append_body(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
         result = await self.push_screen_wait(InputScreen("Append to body:"))
         if result:
-            self.tree.append_body(self.tree.current, result)
+            self.current_tree.append_body(self.current_tree.current, result)
             self.save_tree()
             self.refresh_content()
     
     def action_mark_done(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
-        self.tree.set_status(self.tree.current, NodeStatus.DONE, auto_up=True)
+        self.current_tree.set_status(self.current_tree.current, NodeStatus.DONE, auto_up=True)
         self.save_tree()
         self.refresh_node_tree()
         self.refresh_content()
     
     def action_mark_dropped(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
-        self.tree.set_status(self.tree.current, NodeStatus.DROPPED, auto_up=True)
+        self.current_tree.set_status(self.current_tree.current, NodeStatus.DROPPED, auto_up=True)
         self.save_tree()
         self.refresh_node_tree()
         self.refresh_content()
     
     def action_mark_todo(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
-        self.tree.set_status(self.tree.current, NodeStatus.TODO, auto_up=False)
+        self.current_tree.set_status(self.current_tree.current, NodeStatus.TODO, auto_up=False)
         self.save_tree()
         self.refresh_node_tree()
         self.refresh_content()
     
     async def action_add_link(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
         result = await self.push_screen_wait(
-            SelectNodeScreen(self.tree, "Select link target:", self.tree.current)
+            SelectNodeScreen(self.current_tree, "Select link target:", self.current_tree.current)
         )
         if result:
-            self.tree.add_link(self.tree.current, result)
+            self.current_tree.add_link(self.current_tree.current, result)
             self.save_tree()
             self.refresh_content()
     
     async def action_remove_link(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
-        node = self.tree.get_current_node()
+        node = self.current_tree.get_current_node()
         if not node.links:
             return
         
         result = await self.push_screen_wait(InputScreen("Remove link to node ID:"))
         if result and result in node.links:
-            self.tree.remove_link(node.id, result)
+            self.current_tree.remove_link(node.id, result)
             self.save_tree()
             self.refresh_content()
     
     def action_show_backlinks(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
-        self.push_screen(BacklinksScreen(self.tree, self.tree.current))
+        self.push_screen(BacklinksScreen(self.current_tree, self.current_tree.current))
     
     async def action_move_node(self) -> None:
-        if not self.tree or self.tree.current == "root":
+        if not self.current_tree or self.current_tree.current == "root":
             return
         
         result = await self.push_screen_wait(
-            SelectNodeScreen(self.tree, f"Move [{self.tree.current}] to:", self.tree.current)
+            SelectNodeScreen(self.current_tree, f"Move [{self.current_tree.current}] to:", self.current_tree.current)
         )
         if result:
             try:
-                self.tree.move_node(self.tree.current, result)
+                self.current_tree.move_node(self.current_tree.current, result)
                 self.save_tree()
                 self.refresh_node_tree()
             except ValueError as e:
                 self.notify(str(e), severity="error")
     
     def action_yank_body(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
-        node = self.tree.get_current_node()
+        node = self.current_tree.get_current_node()
         try:
             pyperclip.copy(node.body)
             self.notify("Copied body to clipboard")
@@ -1012,12 +1080,12 @@ links: [{links_str}]
             self.notify("Clipboard not available", severity="warning")
     
     def action_paste_body(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
         try:
             text = pyperclip.paste()
-            self.tree.append_body(self.tree.current, text)
+            self.current_tree.append_body(self.current_tree.current, text)
             self.save_tree()
             self.refresh_content()
             self.notify("Pasted to body")
@@ -1025,12 +1093,12 @@ links: [{links_str}]
             self.notify("Clipboard not available", severity="warning")
     
     def action_yank_id(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
         try:
-            pyperclip.copy(self.tree.current)
-            self.notify(f"Copied [{self.tree.current}] to clipboard")
+            pyperclip.copy(self.current_tree.current)
+            self.notify(f"Copied [{self.current_tree.current}] to clipboard")
         except Exception:
             self.notify("Clipboard not available", severity="warning")
     
@@ -1049,16 +1117,16 @@ links: [{links_str}]
             self.notify(f"Created tree '{result}'")
     
     async def action_rename_tree(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
-        result = await self.push_screen_wait(InputScreen("New name:", self.tree.name))
-        if result and result != self.tree.name:
+        result = await self.push_screen_wait(InputScreen("New name:", self.current_tree.name))
+        if result and result != self.current_tree.name:
             if tree_exists(result):
                 self.notify(f"Tree '{result}' already exists", severity="error")
                 return
             
-            old_name = self.tree.name
+            old_name = self.current_tree.name
             try:
                 rename_tree(old_name, result)
                 set_current_tree_name(result)
@@ -1069,35 +1137,35 @@ links: [{links_str}]
                 self.notify(str(e), severity="error")
     
     async def action_delete_tree(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
         confirmed = await self.push_screen_wait(
-            ConfirmScreen(f"Delete tree '{self.tree.name}'?")
+            ConfirmScreen(f"Delete tree '{self.current_tree.name}'?")
         )
         if confirmed:
-            name = self.tree.name
+            name = self.current_tree.name
             delete_tree(name)
             set_current_tree_name(None)
-            self.tree = None
+            self.current_tree = None
             self.refresh_trees_list()
             self.refresh_node_tree()
             self.refresh_content()
             self.notify(f"Deleted tree '{name}'")
     
     async def action_search(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
-        result = await self.push_screen_wait(SearchScreen(self.tree))
+        result = await self.push_screen_wait(SearchScreen(self.current_tree))
         if result:
             self.navigate_to(result)
     
     def action_show_stats(self) -> None:
-        if not self.tree:
+        if not self.current_tree:
             return
         
-        self.push_screen(StatisticsScreen(self.tree))
+        self.push_screen(StatisticsScreen(self.current_tree))
     
     def action_show_help(self) -> None:
         self.push_screen(HelpScreen())
@@ -1106,17 +1174,28 @@ links: [{links_str}]
         self.save_tree()
         self.notify("Saved")
     
-    @on(Tree.NodeSelected)
-    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
-        """Handle tree node selection."""
-        if event.node.data and self.tree:
-            self.navigate_to(event.node.data)
+    @on(Tree.NodeHighlighted)
+    def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
+        """Handle tree node highlight (cursor movement)."""
+        if self._updating_tree:
+            return
+        if event.node.data and self.current_tree:
+            node_id = event.node.data
+            if self.current_tree.current != node_id:
+                self._updating_tree = True
+                try:
+                    self.current_tree.go_to(node_id)
+                    self.save_tree()
+                    self.refresh_content()
+                    self.link_index = 0
+                finally:
+                    self._updating_tree = False
     
     @on(ListView.Selected, "#trees-list")
     def on_tree_list_selected(self, event: ListView.Selected) -> None:
         """Handle tree list selection."""
-        if event.list_view.index is not None and event.list_view.index < len(self.trees_list):
-            name = self.trees_list[event.list_view.index]
+        if event.list_view.index is not None and event.list_view.index < len(self.current_trees_list):
+            name = self.current_trees_list[event.list_view.index]
             set_current_tree_name(name)
             self.load_current_tree()
             self.refresh_trees_list()

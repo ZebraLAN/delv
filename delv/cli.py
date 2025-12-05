@@ -1,5 +1,7 @@
 """CLI commands for Delv."""
 
+from __future__ import annotations
+
 import subprocess
 import tempfile
 from pathlib import Path
